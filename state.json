@@ -1,1 +1,9 @@
-{}
+{
+  "call_made": false,
+  "consecutive_errors": 0,
+  "discovered_codes": [],
+  "error_alert_sent": false,
+  "last_heartbeat": "",
+  "notified_venues": [],
+  "possible_alert_sent": false
+}
