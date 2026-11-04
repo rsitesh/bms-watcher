@@ -2,7 +2,7 @@ name: Avengers Doomsday ticket watcher
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes (GitHub may delay runs a few minutes)
+    - cron: "*/13 * * * *"   # every 13 minutes (GitHub may delay runs a few minutes)
   workflow_dispatch:
     inputs:
       mode:
