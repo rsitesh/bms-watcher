@@ -1,8 +1,8 @@
 {
   "call_made": false,
-  "consecutive_errors": 5,
+  "consecutive_errors": 6,
   "discovered_codes": [],
-  "error_alert_sent": false,
+  "error_alert_sent": true,
   "last_heartbeat": "20261110",
   "notified_venues": [],
   "possible_alert_sent": false
