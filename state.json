@@ -1,9 +1,15 @@
 {
-  "call_made": false,
-  "consecutive_errors": 4,
-  "discovered_codes": [],
+  "call_made": true,
+  "consecutive_errors": 0,
+  "discovered_codes": [
+    "ET00439706",
+    "ET00526306"
+  ],
   "error_alert_sent": false,
   "last_heartbeat": "20261116",
-  "notified_venues": [],
+  "notified_venues": [
+    "Cinepolis: DSL Virtue Mall Uppal, Hyderabad",
+    "Cinepolis: Mantra Mall, Attapur"
+  ],
   "possible_alert_sent": false
 }
