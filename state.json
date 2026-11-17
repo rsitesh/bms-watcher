@@ -1,6 +1,6 @@
 {
   "call_made": true,
-  "consecutive_errors": 1,
+  "consecutive_errors": 0,
   "discovered_codes": [
     "ET00439706",
     "ET00526306"
@@ -8,10 +8,13 @@
   "error_alert_sent": false,
   "last_heartbeat": "20261116",
   "notified_venues": [
+    "Aparna Cinemas: Nallagandla",
     "Cinepolis: DSL Virtue Mall Uppal, Hyderabad",
     "Cinepolis: Lulu Mall, Hyderabad",
     "Cinepolis: Mantra Mall, Attapur",
-    "Cinepolis: TNR North City, Suchitra, Hyderabad"
+    "Cinepolis: TNR North City, Suchitra, Hyderabad",
+    "INOX: Ashoka One, 4K LASER Dolby ATMOS: Kukatpally",
+    "PVR: Next Galleria Mall, Panjagutta"
   ],
   "possible_alert_sent": true
 }
