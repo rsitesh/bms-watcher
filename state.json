@@ -1,6 +1,6 @@
 {
   "call_made": true,
-  "consecutive_errors": 1,
+  "consecutive_errors": 0,
   "discovered_codes": [
     "ET00439706",
     "ET00526306"
@@ -20,6 +20,7 @@
     "Miraj Cinemas: A2A Central Mall, Balanagar",
     "Miraj Cinemas: CineTown, Miyapur",
     "Miraj Cinemas: Geeta, Chandanagar",
+    "Miraj Cinemas: Raghavendra, Malkajgiri",
     "Miraj Cinemas: Shalini Shivani, Kothapet",
     "PVR Lakeshore PXL 4K Laser ATMOS DTS-X Y Junction",
     "PVR Superplex Inorbit: LUXE, PXL, 4DX: Cyberabad",
