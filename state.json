@@ -1,6 +1,6 @@
 {
   "call_made": true,
-  "consecutive_errors": 2,
+  "consecutive_errors": 0,
   "discovered_codes": [
     "ET00439706",
     "ET00526306"
@@ -26,6 +26,7 @@
     "PVR Superplex Inorbit: LUXE, PXL, 4DX: Cyberabad",
     "PVR: Atrium Gachibowli, Hyderabad",
     "PVR: Next Galleria Mall, Panjagutta",
+    "PVR: RK Cineplex, Hyderabad",
     "Prasads Multiplex: Hyderabad"
   ],
   "possible_alert_sent": true
