@@ -8,12 +8,17 @@
   "error_alert_sent": false,
   "last_heartbeat": "20261116",
   "notified_venues": [
+    "ALLU Cinemas: Kokapet",
+    "ART CINEMAS: Vanasthalipuram",
     "Aparna Cinemas: Nallagandla",
     "Cinepolis: DSL Virtue Mall Uppal, Hyderabad",
     "Cinepolis: Lulu Mall, Hyderabad",
     "Cinepolis: Mantra Mall, Attapur",
     "Cinepolis: TNR North City, Suchitra, Hyderabad",
     "INOX: Ashoka One, 4K LASER Dolby ATMOS: Kukatpally",
+    "Miraj Cinemas: Geeta, Chandanagar",
+    "PVR Superplex Inorbit: LUXE, PXL, 4DX: Cyberabad",
+    "PVR: Atrium Gachibowli, Hyderabad",
     "PVR: Next Galleria Mall, Panjagutta"
   ],
   "possible_alert_sent": true
