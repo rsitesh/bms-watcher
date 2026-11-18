@@ -1,6 +1,6 @@
 {
   "call_made": true,
-  "consecutive_errors": 2,
+  "consecutive_errors": 0,
   "discovered_codes": [
     "ET00439706",
     "ET00526306"
