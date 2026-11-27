@@ -6,6 +6,24 @@
     "ET00526306"
   ],
   "error_alert_sent": false,
+  "format_pages": [
+    "ET00439706|20261217",
+    "ET00439706|20261218",
+    "ET00526306|20261217",
+    "ET00526306|20261218"
+  ],
+  "format_shows": [
+    "20261217|10:55 AM|ET00526306",
+    "20261217|11:05 AM|ET00526306",
+    "20261217|11:25 PM|ET00526306",
+    "20261217|2:10 PM|ET00526306",
+    "20261217|5:15 PM|ET00526306",
+    "20261217|8:00 AM|ET00526306",
+    "20261217|8:20 PM|ET00526306",
+    "20261218|8:00 AM|ET00526306"
+  ],
+  "format_started": true,
+  "format_unparsed_alert": false,
   "last_heartbeat": "20261116",
   "notified_venues": [
     "ALLU Cinemas: Kokapet",
@@ -31,5 +49,10 @@
     "PVR: RK Cineplex, Hyderabad",
     "Prasads Multiplex: Hyderabad"
   ],
-  "possible_alert_sent": true
+  "possible_alert_sent": true,
+  "priority_calls_made": 1,
+  "url_pref": {
+    "buy": 1,
+    "movie": 1
+  }
 }
