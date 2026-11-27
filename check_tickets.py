@@ -3,8 +3,10 @@
 Avengers: Doomsday - BookMyShow Hyderabad ticket watcher.
 
 Checks whether bookings are open and which cinemas have shows, then alerts you
-by WhatsApp (CallMeBot, free) and a phone call (Twilio). Built to run on a
-schedule in GitHub Actions, so it keeps working while your laptop is off.
+by WhatsApp (CallMeBot, free) and a phone call (Twilio). Prasads (or any
+cinemas in PRIORITY_VENUES) gets its own call as soon as it opens, and another
+whenever new Infinity Vision 3D/PCX showtimes are added there. Built to run
+every 8 minutes in GitHub Actions, so it keeps working while your laptop is off.
 
 Usage:
   python check_tickets.py                # normal check (sends alerts, saves state)
@@ -60,7 +62,32 @@ ERROR_ALERT_AFTER = int(env("ERROR_ALERT_AFTER", "6"))
 HEARTBEAT_HOUR_IST = env("HEARTBEAT_HOUR_IST", "21")  # set to "off" to disable
 CALL_ON_POSSIBLE = env("CALL_ON_POSSIBLE", "false").lower() == "true"
 STATE_FILE = env("STATE_FILE", "state.json")
-MAX_CODES = 6
+MAX_CODES = int(env("MAX_CODES", "10"))
+
+# Cinemas that get their own phone call the moment they open (substring match,
+# case-insensitive). "prasad" matches "Prasads Multiplex" and "Prasads Large Screen".
+PRIORITY_VENUES = [v.lower() for v in env_list("PRIORITY_VENUES", "prasad")]
+PRIORITY_LABEL = env("PRIORITY_LABEL", "Prasads")
+PRIORITY_CALLS = int(env("PRIORITY_CALLS", "1"))  # how many runs in a row to call
+CALL_ONLY_FOR_PRIORITY = env("CALL_ONLY_FOR_PRIORITY", "false").lower() == "true"
+
+# Format watch: alert when NEW showtimes in a premium format are added at the
+# priority cinema (Prasads). Comma = any of these; "+" inside an item = all of them
+# (e.g. "infinity vision+pcx" only matches shows labelled with both).
+FORMAT_KEYWORDS = [
+    [k.strip().lower() for k in item.split("+") if k.strip()]
+    for item in env_list("WATCH_FORMATS", "infinity vision,pcx")
+]
+FORMAT_LABEL = env("WATCH_FORMAT_LABEL", "Infinity Vision 3D/PCX")
+# Event codes whose every show counts as the watched format (e.g. the code in the
+# BookMyShow URL after picking "Infinity Vision 3D" as the format).
+FORMAT_EVENT_CODES = [c.upper() for c in env_list("FORMAT_EVENT_CODES")]
+FORMAT_CALL = env("FORMAT_CALL", "true").lower() == "true"
+DEBUG_DIR = env("DEBUG_DIR", "debug")
+
+# Speed: hard cap on how long one run spends talking to BookMyShow
+RUN_BUDGET_SECONDS = int(env("RUN_BUDGET_SECONDS", "120"))
+REQUEST_TIMEOUT = int(env("REQUEST_TIMEOUT", "15"))
 
 Page = namedtuple("Page", "status url text")
 
@@ -114,16 +141,25 @@ class Fetcher:
                 "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
             )
         self.s.headers.update({"Accept-Language": "en-IN,en;q=0.9"})
-        self.ok = self.blocked = self.failed = 0
+        self.ok = self.blocked = self.failed = self.skipped = 0
         self._first = True
+        self.deadline = time.monotonic() + RUN_BUDGET_SECONDS
+
+    def remaining(self) -> float:
+        return self.deadline - time.monotonic()
 
     def get(self, url: str) -> Page | None:
+        if self.remaining() <= 0:
+            self.skipped += 1
+            log(f"Time budget used up, skipping {url}")
+            return None
         if not self._first:
-            time.sleep(random.uniform(2, 4))  # be gentle with BookMyShow
+            time.sleep(random.uniform(0.8, 1.8))  # still gentle with BookMyShow
         self._first = False
         for attempt in range(2):
+            timeout = max(5, min(REQUEST_TIMEOUT, self.remaining()))
             try:
-                r = self.s.get(url, timeout=30, allow_redirects=True)
+                r = self.s.get(url, timeout=timeout, allow_redirects=True)
                 text, status, final = r.text or "", r.status_code, str(r.url)
                 low = text[:30000].lower()
                 if status in (403, 429, 503) or (
@@ -143,19 +179,29 @@ class Fetcher:
                 self.ok += 1
                 log(f"{status} {url} -> {final} ({len(text)} bytes)")
                 return Page(status, final, text)
-            except Exception as e:  # network hiccup: retry once
+            except Exception as e:  # network hiccup: retry once if there's time
                 log(f"Error fetching {url}: {e}")
-                if attempt == 0:
-                    time.sleep(3)
+                if attempt == 0 and self.remaining() > 20:
+                    time.sleep(2)
+                    continue
+                break
         self.failed += 1
         return None
 
 
-def first_page(f: Fetcher, urls: list[str]) -> Page | None:
-    """Try URL formats in order; skip ones that 404."""
-    for url in urls:
-        page = f.get(url)
+# Which URL format worked last time ("movie"/"buy" -> index), saved in state so
+# later runs skip formats that 404.
+URL_PREF: dict[str, int] = {}
+
+
+def first_page(f: Fetcher, urls: list[str], kind: str) -> Page | None:
+    """Try URL formats (last-working one first); skip ones that 404."""
+    pref = URL_PREF.get(kind, 0)
+    order = [pref] + [i for i in range(len(urls)) if i != pref] if pref < len(urls) else range(len(urls))
+    for i in order:
+        page = f.get(urls[i])
         if page is not None and page.status != 404:
+            URL_PREF[kind] = i
             return page
     return None
 
@@ -178,18 +224,129 @@ def codes_near_slug(text: str) -> set[str]:
 # --------------------------------------------------------------------------- #
 # Parsing
 # --------------------------------------------------------------------------- #
+def clean_name(raw: str) -> str:
+    try:
+        name = json.loads(f'"{raw}"')
+    except Exception:
+        name = raw
+    return html.unescape(name).strip()
+
+
 def extract_venues(text: str) -> set[str]:
     names = set()
     for rx in VENUE_RES:
         for raw in rx.findall(text):
-            try:
-                name = json.loads(f'"{raw}"')
-            except Exception:
-                name = raw
-            name = html.unescape(name).strip()
+            name = clean_name(raw)
             if 2 < len(name) < 150:
                 names.add(name)
     return names
+
+
+# ---- Show-level parsing (for the format watch) ---------------------------- #
+TIME_RE = re.compile(r"(?<![\d:])(0?[1-9]|1[0-2]):([0-5]\d)\s?([AaPp])\.?[Mm]\b")
+ISO_TIME_RE = re.compile(r"(?<=[T ])([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?(?!\d)")
+END_KEY_RE = re.compile(r"end|close|cutoff|till|until", re.I)
+
+
+def venue_sections(text: str) -> dict[str, str]:
+    """Split the page at each venue name; each venue gets the text up to the next venue."""
+    hits = sorted(
+        (m.start(), clean_name(m.group(1))) for rx in VENUE_RES for m in rx.finditer(text)
+    )
+    out: dict[str, list[str]] = {}
+    for i, (pos, name) in enumerate(hits):
+        end = hits[i + 1][0] if i + 1 < len(hits) else len(text)
+        out.setdefault(name, []).append(text[pos:min(end, pos + 400_000)])
+    return {k: "\n".join(v) for k, v in out.items()}
+
+
+def find_times(text: str) -> list[tuple[int, str]]:
+    """(position, normalized '10:30 PM') for show start times, skipping end times."""
+    found = []
+    for m in TIME_RE.finditer(text):
+        if END_KEY_RE.search(text[max(0, m.start() - 25):m.start()]):
+            continue
+        found.append((m.start(), f"{int(m.group(1))}:{m.group(2)} {m.group(3).upper()}M"))
+    if found:
+        return found
+    for m in ISO_TIME_RE.finditer(text):  # fallback: 24-hour times like 2026-12-17T22:30
+        if END_KEY_RE.search(text[max(0, m.start() - 25):m.start()]):
+            continue
+        h, mi = int(m.group(1)), m.group(2)
+        found.append((m.start(), f"{(h % 12) or 12}:{mi} {'PM' if h >= 12 else 'AM'}"))
+    return found
+
+
+def matches_format(snippet: str) -> bool:
+    low = snippet.lower()
+    return any(all(k in low for k in group) for group in FORMAT_KEYWORDS)
+
+
+def _parent_open(text: str, start: int, limit: int) -> int | None:
+    depth, i, lo = 0, start, max(0, start - limit)
+    while i > lo:
+        i -= 1
+        c = text[i]
+        if c == "}":
+            depth += 1
+        elif c == "{":
+            if depth == 0:
+                return i
+            depth -= 1
+    return None
+
+
+def _close(text: str, start: int, limit: int) -> int | None:
+    depth = 0
+    for j in range(start, min(len(text), start + limit)):
+        c = text[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    return None
+
+
+def show_context(text: str, pos: int, prev_pos: int | None, next_pos: int | None) -> str:
+    """Text describing one show: the largest JSON object around this time that
+    contains no other show time; else (HTML) the text halfway to its neighbours."""
+    best, start, limit = None, pos, 6000
+    for _ in range(6):
+        o = _parent_open(text, start, limit)
+        if o is None:
+            break
+        c = _close(text, o, limit * 2)
+        if c is None:
+            break
+        obj = text[o:c]
+        if len({t for _, t in find_times(obj)}) > 1:
+            break
+        best, start = obj, o
+    if best:
+        return best
+    lo = (prev_pos + pos) // 2 if prev_pos is not None else max(0, pos - 400)
+    hi = (pos + next_pos) // 2 if next_pos is not None else pos + 400
+    return text[lo:hi]
+
+
+def parse_shows(section: str, force_format: bool = False) -> dict[str, bool]:
+    """{'10:30 PM': is_watched_format} for one cinema's part of the page."""
+    times = find_times(section)
+    shows: dict[str, bool] = {}
+    for i, (pos, t) in enumerate(times):
+        prev_pos = times[i - 1][0] if i else None
+        next_pos = times[i + 1][0] if i + 1 < len(times) else None
+        is_fmt = force_format or matches_format(show_context(section, pos, prev_pos, next_pos))
+        shows[t] = shows.get(t, False) or is_fmt
+    return shows
+
+
+def time_sort_key(t: str) -> int:
+    hm, ap = t.split()
+    h, m = map(int, hm.split(":"))
+    return (h % 12 + (12 if ap == "PM" else 0)) * 60 + m
 
 
 def date_in_url(url: str) -> str | None:
@@ -209,27 +366,36 @@ def discover_codes(f: Fetcher) -> set[str]:
 
 def check_movie_page(f: Fetcher, code: str) -> tuple[bool, set[str], str | None]:
     """Returns (book button visible?, related event codes, movie page URL)."""
-    page = first_page(f, movie_urls(code))
+    page = first_page(f, movie_urls(code), "movie")
     if not page:
         return False, set(), None
     return bool(BOOK_BUTTON_RE.search(page.text)), codes_near_slug(page.text), page.url
 
 
-def check_showtimes(f: Fetcher, code: str, dates: list[str]) -> dict[str, set[str]]:
+ShowPage = namedtuple("ShowPage", "code req_date date text")
+
+
+def check_showtimes(
+    f: Fetcher, code: str, dates: list[str]
+) -> tuple[dict[str, set[str]], list[ShowPage]]:
+    """Returns ({venue: dates}, pages fetched successfully, for show-level parsing)."""
     venues: dict[str, set[str]] = {}
+    pages: list[ShowPage] = []
     for date in dates:
-        page = first_page(f, buyticket_urls(code, date))
+        page = first_page(f, buyticket_urls(code, date), "buy")
         if not page:
             continue
         if "buytickets" not in page.url.lower():
             log(f"  {code} {date}: redirected away from booking page -> not open")
+            pages.append(ShowPage(code, date, date, ""))
             continue
         found = extract_venues(page.text)
         actual = date_in_url(page.url) or date
         log(f"  {code} {date}: {len(found)} cinema(s) found (page date {actual})")
         for v in found:
             venues.setdefault(v, set()).add(actual)
-    return venues
+        pages.append(ShowPage(code, date, actual, page.text))
+    return venues, pages
 
 
 # --------------------------------------------------------------------------- #
@@ -288,12 +454,27 @@ def make_call(spoken: str) -> bool:
         return False
 
 
-def tickets_message(venues: dict[str, set[str]], matched: set[str], link: str) -> str:
-    lines = [f"🎬 {MOVIE_TITLE}: BOOKINGS OPEN in {CITY.title()}!", ""]
-    ordered = sorted(venues, key=lambda v: (v not in matched, v.lower()))
+def is_priority(venue: str) -> bool:
+    return any(k in venue.lower() for k in PRIORITY_VENUES)
+
+
+def tickets_message(
+    venues: dict[str, set[str]], matched: set[str], link: str, priority_new: bool
+) -> str:
+    if priority_new:
+        head = f"🎯 {PRIORITY_LABEL.upper()} IS OPEN for {MOVIE_TITLE}!"
+    else:
+        head = f"🎬 {MOVIE_TITLE}: BOOKINGS OPEN in {CITY.title()}!"
+    lines = [head, ""]
+    ordered = sorted(venues, key=lambda v: (not is_priority(v), v not in matched, v.lower()))
     lines.append(f"Cinemas with shows ({len(venues)}):")
     for v in ordered[:25]:
-        star = "⭐ " if VENUE_FILTER and v in matched else ""
+        if is_priority(v):
+            star = "🎯 "
+        elif VENUE_FILTER and v in matched:
+            star = "⭐ "
+        else:
+            star = ""
         dates = ", ".join(pretty_date(d) for d in sorted(venues[v]))
         lines.append(f"• {star}{v} ({dates})")
     if len(ordered) > 25:
@@ -313,6 +494,13 @@ DEFAULT_STATE = {
     "consecutive_errors": 0,
     "error_alert_sent": False,
     "last_heartbeat": "",
+    "priority_calls_made": 0,
+    "url_pref": {},
+    # format watch
+    "format_started": False,
+    "format_pages": [],      # code|date pages already seen once (their shows are the baseline)
+    "format_shows": [],      # date|time|code of every watched-format show seen so far
+    "format_unparsed_alert": False,
 }
 
 
@@ -328,6 +516,111 @@ def save_state(state: dict) -> None:
     with open(STATE_FILE, "w") as fh:
         json.dump(state, fh, indent=2, sort_keys=True)
         fh.write("\n")
+
+
+def describe_shows(keys: set[str], spoken: bool = False) -> str:
+    """'17 Dec: 10:30 AM, 2:15 PM; 18 Dec: ...' from date|time|code keys."""
+    by_date: dict[str, set[str]] = {}
+    for k in keys:
+        d, t, _ = k.split("|", 2)
+        by_date.setdefault(d, set()).add(t)
+    parts = []
+    for d in sorted(by_date):
+        times = sorted(by_date[d], key=time_sort_key)
+        if spoken:
+            day = datetime.strptime(d, "%Y%m%d").strftime("%d %B").lstrip("0")
+            parts.append(f"{day} at {', '.join(times)}")
+        else:
+            parts.append(f"{pretty_date(d)}: {', '.join(times)}")
+    return ("; " if spoken else "\n").join(parts)
+
+
+def format_watch(state: dict, pages: list[ShowPage], link: str) -> list[str]:
+    """Alert when new watched-format shows (e.g. Infinity Vision 3D/PCX) appear at
+    the priority cinema. Returns lines for the run summary."""
+    known = set(state["format_shows"])
+    baselined = set(state["format_pages"])
+    first_run = not state["format_started"]
+    all_fmt: set[str] = set()
+    new_fmt: set[str] = set()
+    mentions = 0
+    summary = [f"- {PRIORITY_LABEL} shows parsed (★ = {FORMAT_LABEL}):"]
+
+    for pg in pages:
+        page_id = f"{pg.code}|{pg.req_date}"
+        here: set[str] = set()
+        for venue, section in venue_sections(pg.text).items():
+            if not is_priority(venue):
+                continue
+            shows = parse_shows(section, force_format=pg.code in FORMAT_EVENT_CODES)
+            if not shows:  # format named here but no showtimes could be read at all
+                mentions += sum(section.lower().count(g[0]) for g in FORMAT_KEYWORDS)
+            here |= {f"{pg.date}|{t}|{pg.code}" for t, is_fmt in shows.items() if is_fmt}
+            listing = ", ".join(
+                f"{t}{'★' if shows[t] else ''}" for t in sorted(shows, key=time_sort_key)
+            )
+            summary.append(f"  - {pg.code} {pretty_date(pg.date)} · {venue}: {listing or 'no times read'}")
+            write_debug(pg, venue, section, shows)
+        if page_id in baselined:
+            new_fmt |= here - known
+        baselined.add(page_id)
+        known |= here
+        all_fmt |= here
+
+    state["format_pages"] = sorted(baselined)
+    state["format_shows"] = sorted(known)
+    if not pages:
+        return summary
+
+    venue_word = PRIORITY_LABEL
+    if first_run:
+        current = describe_shows(all_fmt) or "none right now"
+        send_whatsapp(
+            f"👀 Now tracking {FORMAT_LABEL} shows at {venue_word} for {MOVIE_TITLE}.\n\n"
+            f"Currently listed:\n{current}\n\nI'll alert you when new ones are added."
+        )
+        state["format_started"] = True
+    elif new_fmt:
+        msg = [
+            f"🆕 NEW {FORMAT_LABEL} shows at {venue_word}!",
+            "",
+            describe_shows(new_fmt),
+            "",
+            f"All {FORMAT_LABEL} shows now:",
+            describe_shows(all_fmt),
+            "",
+            f"Book now: {link}",
+        ]
+        send_whatsapp("\n".join(msg))
+        if FORMAT_CALL:
+            make_call(
+                f"Alert! New {FORMAT_LABEL.replace('/', ' ')} shows were added at {venue_word} "
+                f"for {MOVIE_TITLE}: {describe_shows(new_fmt, spoken=True)}. Book now."
+            )
+
+    if not all_fmt and mentions and not state["format_unparsed_alert"]:
+        send_whatsapp(
+            f"⚠️ {FORMAT_LABEL} is mentioned in the {venue_word} listing, but I couldn't read the "
+            f"showtimes. Please check the app, and see the run summary on GitHub."
+        )
+        state["format_unparsed_alert"] = True
+
+    summary.append(f"- {FORMAT_LABEL} shows known: {len(known)}; new this run: {len(new_fmt)}")
+    log(f"{FORMAT_LABEL} at {venue_word}: {len(all_fmt)} now, {len(new_fmt)} new")
+    return summary
+
+
+def write_debug(pg: ShowPage, venue: str, section: str, shows: dict[str, bool]) -> None:
+    """Save what was parsed for the priority cinema, for checking against the app."""
+    try:
+        os.makedirs(DEBUG_DIR, exist_ok=True)
+        name = re.sub(r"[^A-Za-z0-9]+", "_", f"{pg.code}_{pg.req_date}_{venue}")[:120]
+        with open(os.path.join(DEBUG_DIR, f"{name}.txt"), "w") as fh:
+            fh.write(f"code={pg.code} requested={pg.req_date} page_date={pg.date} venue={venue}\n")
+            fh.write(f"parsed={json.dumps(shows)}\n\n")
+            fh.write(section[:300_000])
+    except OSError as e:
+        log(f"Could not write debug file: {e}")
 
 
 def write_summary(lines: list[str]) -> None:
@@ -361,7 +654,9 @@ def main() -> int:
         log("All watched dates are in the past. Nothing to do; you can disable the workflow.")
         return 0
 
+    started = time.monotonic()
     state = load_state()
+    URL_PREF.update(state.get("url_pref") or {})
     f = Fetcher()
 
     # Which BookMyShow event codes to watch
@@ -373,41 +668,69 @@ def main() -> int:
     book_button = False
     link = f"{BASE}/explore/movies-{CITY}"
 
+    pages: list[ShowPage] = []
+    bookings_open = bool(state["notified_venues"])
     while queue and len(seen) < MAX_CODES:
         code = queue.pop(0)
         if code in seen:
             continue
         seen.append(code)
         log(f"Checking event {code}")
+        # Showtimes first: they're what matter, so they never get cut by the time budget
+        venues_here, pages_here = check_showtimes(f, code, dates)
+        pages += pages_here
+        for v, ds in venues_here.items():
+            all_venues.setdefault(v, set()).update(ds)
+        # Once bookings are open, one movie page per run is enough to spot new
+        # formats/languages (saves time for the showtime pages)
+        if bookings_open and len(seen) > 1:
+            continue
         button, related, page_url = check_movie_page(f, code)
         book_button |= button
         if page_url and link.endswith(f"movies-{CITY}"):
             link = page_url
         queue += [c for c in sorted(related) if c not in seen and c not in queue]
-        for v, ds in check_showtimes(f, code, dates).items():
-            all_venues.setdefault(v, set()).update(ds)
 
     state["discovered_codes"] = [c for c in seen if c not in EVENT_CODES]
-    matched = {v for v in all_venues if not VENUE_FILTER or any(k in v.lower() for k in VENUE_FILTER)}
+    state["url_pref"] = dict(URL_PREF)
+    priority = {v for v in all_venues if is_priority(v)}
+    matched = priority | {
+        v for v in all_venues if not VENUE_FILTER or any(k in v.lower() for k in VENUE_FILTER)
+    }
     new = matched - set(state["notified_venues"])
+    priority_new = bool(priority & new)
 
     log(f"Event codes checked: {seen or 'none'}")
     log(f"'Book tickets' button seen: {book_button}")
-    log(f"Cinemas found: {len(all_venues)} (matching filter: {len(matched)}, new: {len(new)})")
+    log(f"Cinemas found: {len(all_venues)} (matching: {len(matched)}, new: {len(new)}, "
+        f"{PRIORITY_LABEL}: {sorted(priority) or 'not yet'})")
 
     # --- Alerts -------------------------------------------------------------
     if new:
-        send_whatsapp(tickets_message(all_venues, matched, link))
-        if not state["call_made"]:
-            sample = ", ".join(sorted(new)[:3])
-            if make_call(
-                f"Alert! {MOVIE_TITLE} bookings are open in {CITY}. "
-                f"Shows at {len(matched)} cinemas, including {sample}. "
-                "Check WhatsApp and book now."
-            ):
-                state["call_made"] = True
+        send_whatsapp(tickets_message(all_venues, matched, link, priority_new))
         state["notified_venues"] = sorted(set(state["notified_venues"]) | new)
-    elif book_button and not all_venues and not state["possible_alert_sent"]:
+
+    # Priority cinema (Prasads): its own call, even if a general call already happened
+    if priority and state["priority_calls_made"] < PRIORITY_CALLS:
+        names = " and ".join(sorted(priority)[:2])
+        if make_call(
+            f"Alert! {PRIORITY_LABEL} bookings are open for {MOVIE_TITLE}. "
+            f"Shows are listed at {names}. Book on BookMyShow right now."
+        ):
+            state["priority_calls_made"] += 1
+            state["call_made"] = True
+    # Any other cinema: one general call, unless you only want calls for the priority cinema
+    elif new and not state["call_made"] and not CALL_ONLY_FOR_PRIORITY:
+        sample = ", ".join(sorted(new)[:3])
+        if make_call(
+            f"Alert! {MOVIE_TITLE} bookings are open in {CITY.title()}. "
+            f"Shows at {len(matched)} cinemas, including {sample}. "
+            f"{PRIORITY_LABEL} is not open yet. Check WhatsApp and book now."
+        ):
+            state["call_made"] = True
+
+    # Button visible but cinema list unreadable
+    if not new and book_button and not all_venues and not state["possible_alert_sent"]:
         send_whatsapp(
             f"⚠️ {MOVIE_TITLE}: the 'Book tickets' button appeared on BookMyShow "
             f"({CITY.title()}), but I couldn't read the cinema list. Check now:\n{link}"
@@ -433,15 +756,24 @@ def main() -> int:
         state["consecutive_errors"] = 0
         state["error_alert_sent"] = False
 
+    # --- Format watch (new Infinity Vision 3D/PCX shows at Prasads) ----------
+    format_summary = format_watch(state, pages, link) if FORMAT_KEYWORDS or FORMAT_EVENT_CODES else []
+
     # --- Daily "still alive" message ---------------------------------------
     if (
         HEARTBEAT_HOUR_IST.lower() != "off"
-        and not state["notified_venues"]
         and now.hour >= int(HEARTBEAT_HOUR_IST)
         and state["last_heartbeat"] != today
     ):
         health = "checks are running fine" if f.ok else "BookMyShow is blocking checks right now"
-        send_whatsapp(f"👀 Daily update: no {MOVIE_TITLE} bookings in {CITY.title()} yet; {health}.")
+        if not state["notified_venues"]:
+            send_whatsapp(f"👀 Daily update: no {MOVIE_TITLE} bookings in {CITY.title()} yet; {health}.")
+        elif state["format_started"]:
+            n = len({k.rsplit("|", 1)[0] for k in state["format_shows"]})
+            send_whatsapp(
+                f"👀 Daily update: {n} {FORMAT_LABEL} show(s) at {PRIORITY_LABEL} so far; "
+                f"still watching for new ones. {health.capitalize()}."
+            )
         state["last_heartbeat"] = today
 
     write_summary([
@@ -449,10 +781,16 @@ def main() -> int:
         f"- Event codes: {', '.join(seen) or 'none found yet'}",
         f"- Book button seen: {book_button}",
         f"- Cinemas found: {len(all_venues)}",
-        f"- Requests ok/blocked/failed: {f.ok}/{f.blocked}/{f.failed}",
+        f"- {PRIORITY_LABEL}: {', '.join(sorted(priority)) or 'not open yet'}",
+        f"- Requests ok/blocked/failed/skipped: {f.ok}/{f.blocked}/{f.failed}/{f.skipped}",
+        f"- Check took {time.monotonic() - started:.0f}s",
+        *format_summary,
+        "- All cinemas:",
         *[f"  - {v}" for v in sorted(all_venues)[:40]],
     ])
 
+    log(f"Done in {time.monotonic() - started:.0f}s "
+        f"(ok/blocked/failed/skipped: {f.ok}/{f.blocked}/{f.failed}/{f.skipped})")
     if not DRY_RUN:
         save_state(state)
     return 0
