@@ -2,7 +2,7 @@ name: Avengers Doomsday ticket watcher
 
 on:
   schedule:
-    - cron: "3-59/10 * * * *"   # every 10 minutes (GitHub may delay runs a few minutes)
+    - cron: "3-59/8 * * * *"   # every 8 minutes (GitHub often runs these late; see README for cron-job.org)
   workflow_dispatch:
     inputs:
       mode:
@@ -27,7 +27,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
@@ -36,15 +36,25 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - run: pip install -r requirements.txt
+      - run: pip install --quiet --disable-pip-version-check -r requirements.txt
 
       - name: Run watcher
+        timeout-minutes: 3
         env:
           BMS_EVENT_CODES: ${{ vars.BMS_EVENT_CODES }}
           BMS_DATES: ${{ vars.BMS_DATES }}
           VENUE_FILTER: ${{ vars.VENUE_FILTER }}
           HEARTBEAT_HOUR_IST: ${{ vars.HEARTBEAT_HOUR_IST }}
           CALL_ON_POSSIBLE: ${{ vars.CALL_ON_POSSIBLE }}
+          PRIORITY_VENUES: ${{ vars.PRIORITY_VENUES }}
+          PRIORITY_LABEL: ${{ vars.PRIORITY_LABEL }}
+          PRIORITY_CALLS: ${{ vars.PRIORITY_CALLS }}
+          CALL_ONLY_FOR_PRIORITY: ${{ vars.CALL_ONLY_FOR_PRIORITY }}
+          WATCH_FORMATS: ${{ vars.WATCH_FORMATS }}
+          WATCH_FORMAT_LABEL: ${{ vars.WATCH_FORMAT_LABEL }}
+          FORMAT_EVENT_CODES: ${{ vars.FORMAT_EVENT_CODES }}
+          FORMAT_CALL: ${{ vars.FORMAT_CALL }}
+          MAX_CODES: ${{ vars.MAX_CODES }}
           CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
@@ -61,10 +71,20 @@ jobs:
             probe)
               BMS_MOVIE_SLUG="$PROBE_SLUG" BMS_EVENT_CODES="$PROBE_CODE" \
               BMS_DATES="today,tomorrow" MOVIE_TITLE="$PROBE_SLUG" \
+              STATE_FILE=/tmp/probe_state.json \
               python check_tickets.py --dry-run ;;
             *)
               python check_tickets.py ;;
           esac
+
+      - name: Keep what was read for Prasads (for checking against the app)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prasads-snapshot
+          path: debug/
+          retention-days: 1
+          if-no-files-found: ignore
 
       - name: Save state
         if: ${{ (inputs.mode || 'check') == 'check' }}
@@ -72,4 +92,11 @@ jobs:
           git config user.name "ticket-watcher"
           git config user.email "ticket-watcher@users.noreply.github.com"
           git add state.json
-          git diff --cached --quiet || (git commit -m "Update watcher state [skip ci]" && git push)
+          if git diff --cached --quiet; then echo "No state change"; exit 0; fi
+          git commit -m "Update watcher state [skip ci]"
+          for i in 1 2 3; do
+            git pull --rebase --quiet origin "$GITHUB_REF_NAME" && git push && exit 0
+            echo "Push failed (attempt $i), retrying in 20s..."
+            sleep 20
+          done
+          echo "::warning::Could not save state this run (GitHub error). The watcher keeps running."
