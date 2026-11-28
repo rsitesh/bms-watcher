@@ -52,7 +52,7 @@
   "possible_alert_sent": true,
   "priority_calls_made": 1,
   "url_pref": {
-    "buy": 1,
+    "buy": 0,
     "movie": 1
   }
 }
